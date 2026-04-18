@@ -1,339 +1,254 @@
-#!/bin/bash
-# Arch Linux + GNOME + LUKS USB Installer
-# WORKING VERSION - Clean prompts, no /dev/tty issues
+#!/usr/bin/env bash
+set -Eeuo pipefail
 
-set -e
-
-# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
+trap 'echo -e "${RED}ERROR:${NC} Install failed on line $LINENO. Review the last command output."' ERR
+
+require_root() {
+  if [[ ${EUID} -ne 0 ]]; then
+    echo -e "${RED}Run this script as root from the Arch ISO live environment.${NC}"
+    exit 1
+  fi
+}
+
+require_uefi() {
+  if [[ ! -d /sys/firmware/efi ]]; then
+    echo -e "${RED}This script requires UEFI mode. Reboot the Arch ISO in UEFI mode and try again.${NC}"
+    exit 1
+  fi
+}
+
+require_cmds() {
+  local missing=0
+  for cmd in arch-chroot blkid cryptsetup genfstab lsblk mount pacman pacstrap parted partprobe sgdisk systemctl umount wipefs; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+      echo -e "${RED}Missing required command:${NC} $cmd"
+      missing=1
+    fi
+  done
+  (( missing == 0 )) || exit 1
+}
+
+prompt_secret() {
+  local __var="$1"
+  local prompt="$2"
+  local first second
+  read -r -s -p "$prompt" first
+  echo
+  read -r -s -p "Confirm: " second
+  echo
+  if [[ -z "$first" || "$first" != "$second" ]]; then
+    echo -e "${RED}Values did not match or were empty.${NC}"
+    exit 1
+  fi
+  printf -v "$__var" '%s' "$first"
+}
+
+cleanup_mounts() {
+  swapoff -a 2>/dev/null || true
+  umount -R /mnt 2>/dev/null || true
+  cryptsetup close cryptroot 2>/dev/null || true
+}
+
+require_root
+require_uefi
+require_cmds
+cleanup_mounts
+
 clear
-echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}    Arch Linux USB Installer v6.0${NC}"
-echo -e "${GREEN}========================================${NC}"
-echo ""
+printf "%b\n" "${GREEN}========================================${NC}"
+printf "%b\n" "${GREEN}   Arch Linux USB Installer v7.0${NC}"
+printf "%b\n" "${GREEN}========================================${NC}"
+printf "\n"
 
-# ============================================================
-# LOAD KERNEL MODULES
-# ============================================================
-echo -e "${YELLOW}Loading kernel modules...${NC}"
-modprobe dm_mod 2>/dev/null || true
-modprobe dm_crypt 2>/dev/null || true
-modprobe aesni_intel 2>/dev/null || true
-modprobe aes_x86_64 2>/dev/null || true
-echo -e "${GREEN}✓ Modules loaded${NC}"
-echo ""
+echo -e "${YELLOW}Detected block devices:${NC}"
+lsblk -d -o NAME,MODEL,SIZE,TRAN,TYPE
+printf "\n"
 
-# ============================================================
-# SHOW DRIVES
-# ============================================================
-echo -e "${YELLOW}=== ALL DETECTED DRIVES ===${NC}"
-lsblk -o NAME,MODEL,SIZE,TYPE
-echo ""
-
-# ============================================================
-# GET TARGET USB
-# ============================================================
-echo -e "${YELLOW}Which drive do you want to INSTALL Arch on?${NC}"
-echo -e "${RED}⚠️  This drive will be COMPLETELY WIPED ⚠️${NC}"
-echo ""
-read -p "Enter FULL device path (e.g., /dev/sda): " USB_DEV
-
-if [ -z "$USB_DEV" ]; then
-    echo -e "${RED}ERROR: No device entered.${NC}"
-    exit 1
+read -r -p "Enter FULL target device path (example: /dev/sdb): " USB_DEV
+if [[ -z "${USB_DEV:-}" || ! -b "$USB_DEV" ]]; then
+  echo -e "${RED}Invalid block device:${NC} ${USB_DEV:-<empty>}"
+  exit 1
 fi
 
-if [ ! -b "$USB_DEV" ]; then
-    echo -e "${RED}ERROR: $USB_DEV does NOT exist!${NC}"
-    exit 1
-fi
+read -r -p "Enter username: " USERNAME
+[[ -n "${USERNAME:-}" ]] || { echo -e "${RED}Username cannot be empty.${NC}"; exit 1; }
 
-# ============================================================
-# CONFIRMATION
-# ============================================================
-echo ""
-echo -e "${RED}⚠️  YOU HAVE SELECTED:${NC}"
-lsblk -o NAME,MODEL,SIZE "$USB_DEV"
-echo ""
-echo -e "${RED}ALL DATA ON THIS DRIVE WILL BE DESTROYED!${NC}"
-echo ""
-read -p "Type 'YES' to continue: " confirm
-if [ "$confirm" != "YES" ]; then
-    echo "Installation cancelled."
-    exit 0
-fi
-
-# ============================================================
-# USER INFORMATION
-# ============================================================
-echo ""
-echo -e "${GREEN}=== User Setup ===${NC}"
-read -p "Enter username: " USERNAME
-
-echo ""
-read -s -p "Enter user password (for login): " USER_PASS
-echo ""
-read -s -p "Confirm user password: " USER_PASS2
-echo ""
-if [ "$USER_PASS" != "$USER_PASS2" ] || [ -z "$USER_PASS" ]; then
-    echo -e "${RED}Passwords do not match or empty. Exiting.${NC}"
-    exit 1
-fi
-
-echo ""
-read -p "Enter timezone (e.g., America/New_York) [UTC]: " TIMEZONE
-TIMEZONE="${TIMEZONE:-UTC}"
-
-read -p "Enter hostname [arch-usb]: " HOSTNAME
+read -r -p "Enter hostname [arch-usb]: " HOSTNAME
 HOSTNAME="${HOSTNAME:-arch-usb}"
 
-# ============================================================
-# LUKS PASSPHRASE (CAN BE SAME OR DIFFERENT FROM USER PASSWORD)
-# ============================================================
-echo ""
-echo -e "${GREEN}=== LUKS Encryption Setup ===${NC}"
-echo -e "${YELLOW}This passphrase will be required EVERY TIME you boot the USB${NC}"
-echo ""
-read -s -p "Enter LUKS passphrase (for disk encryption): " LUKS_PASS
-echo ""
-read -s -p "Confirm LUKS passphrase: " LUKS_PASS2
-echo ""
-if [ "$LUKS_PASS" != "$LUKS_PASS2" ] || [ -z "$LUKS_PASS" ]; then
-    echo -e "${RED}Passphrases do not match or empty. Exiting.${NC}"
-    exit 1
-fi
+read -r -p "Enter timezone [UTC]: " TIMEZONE
+TIMEZONE="${TIMEZONE:-UTC}"
+[[ -e "/usr/share/zoneinfo/$TIMEZONE" ]] || { echo -e "${RED}Timezone not found:${NC} $TIMEZONE"; exit 1; }
 
-# ============================================================
-# SUMMARY
-# ============================================================
-echo ""
-echo -e "${GREEN}=== INSTALLATION SUMMARY ===${NC}"
-echo "Target drive:   $USB_DEV"
-echo "Username:       $USERNAME"
-echo "Hostname:       $HOSTNAME"
-echo "Timezone:       $TIMEZONE"
-echo ""
-read -p "Start installation? (yes/no): " proceed
-if [ "$proceed" != "yes" ]; then
-    echo "Cancelled."
-    exit 0
-fi
+read -r -p "Enter locale [en_US.UTF-8]: " LOCALE
+LOCALE="${LOCALE:-en_US.UTF-8}"
 
-# ============================================================
-# DYNAMIC PARTITIONING (FIXED)
-# ============================================================
-echo ""
-echo -e "${GREEN}=== Partitioning drive ===${NC}"
+read -r -p "Enter keymap [us]: " KEYMAP
+KEYMAP="${KEYMAP:-us}"
 
-# Get total size in GiB for user info
-TOTAL_SIZE=$(lsblk -b -d -o SIZE -n "$USB_DEV" | head -1)
-TOTAL_GB=$((TOTAL_SIZE / 1024 / 1024 / 1024))
+prompt_secret USER_PASS "Enter password for user ${USERNAME}: "
+prompt_secret ROOT_PASS "Enter root password: "
+prompt_secret LUKS_PASS "Enter LUKS passphrase: "
 
-echo -e "${YELLOW}USB size detected: ${TOTAL_GB} GiB${NC}"
-echo -e "${YELLOW}Will use: 512MB EFI, 30% of remaining for system, 70% for home${NC}"
-echo ""
+printf "\n"
+echo -e "${RED}Selected target:${NC}"
+lsblk -o NAME,MODEL,SIZE,TYPE,MOUNTPOINT "$USB_DEV"
+printf "\n"
+echo -e "${RED}This will ERASE all data on $USB_DEV.${NC}"
+read -r -p "Type YES to continue: " CONFIRM
+[[ "$CONFIRM" == "YES" ]] || { echo "Cancelled."; exit 0; }
 
-umount "${USB_DEV}"* 2>/dev/null || true
-dd if=/dev/zero of="$USB_DEV" bs=1M count=10 status=progress 2>/dev/null
+echo -e "${YELLOW}Refreshing keyring and mirrors...${NC}"
+timedatectl set-ntp true || true
+pacman -Sy --noconfirm archlinux-keyring reflector
+reflector --latest 20 --protocol https --sort rate --save /etc/pacman.d/mirrorlist || true
+
+echo -e "${YELLOW}Wiping and partitioning ${USB_DEV}...${NC}"
+cleanup_mounts
+sgdisk --zap-all "$USB_DEV"
+wipefs -a "$USB_DEV"
+partprobe "$USB_DEV" || true
 
 parted -s "$USB_DEV" mklabel gpt
-parted -s "$USB_DEV" mkpart primary fat32 1MiB 513MiB
+parted -s "$USB_DEV" mkpart ESP fat32 1MiB 1025MiB
 parted -s "$USB_DEV" set 1 esp on
-parted -s "$USB_DEV" mkpart primary 513MiB 30%
-parted -s "$USB_DEV" mkpart primary 30% 100%
+parted -s "$USB_DEV" mkpart CRYPTROOT 1025MiB 100%
+partprobe "$USB_DEV"
 sleep 2
 
-EFI_PART="${USB_DEV}1"
-SYSTEM_LUKS="${USB_DEV}2"
-HOME_LUKS="${USB_DEV}3"
-
-echo -e "${GREEN}✓ Partitions created${NC}"
-lsblk "$USB_DEV"
-
-# ============================================================
-# LUKS ENCRYPTION (FIXED CIPHER)
-# ============================================================
-echo ""
-echo -e "${GREEN}=== Setting up LUKS encryption ===${NC}"
-echo -e "${YELLOW}Using LUKS2 with AES-XTS and Argon2id${NC}"
-
-echo "Encrypting system partition..."
-printf '%s' "$LUKS_PASS" | cryptsetup luksFormat --type luks2 \
-    --cipher aes-xts-plain64 \
-    --key-size 512 \
-    --pbkdf argon2id \
-    "$SYSTEM_LUKS" -
-
-echo "Encrypting home partition..."
-printf '%s' "$LUKS_PASS" | cryptsetup luksFormat --type luks2 \
-    --cipher aes-xts-plain64 \
-    --key-size 512 \
-    --pbkdf argon2id \
-    "$HOME_LUKS" -
-
-echo "Opening encrypted partitions..."
-printf '%s' "$LUKS_PASS" | cryptsetup open "$SYSTEM_LUKS" cryptsys -
-printf '%s' "$LUKS_PASS" | cryptsetup open "$HOME_LUKS" crypthome -
-
-echo -e "${GREEN}✓ Encryption complete${NC}"
-
-# ============================================================
-# FORMAT
-# ============================================================
-echo "Formatting partitions..."
-mkfs.fat -F32 "$EFI_PART"
-mkfs.ext4 -O '^has_journal' /dev/mapper/cryptsys
-mkfs.ext4 -O '^has_journal' /dev/mapper/crypthome
-
-# ============================================================
-# MOUNT
-# ============================================================
-mount /dev/mapper/cryptsys /mnt
-mkdir -p /mnt/home /mnt/boot
-mount /dev/mapper/crypthome /mnt/home
-mount "$EFI_PART" /mnt/boot
-
-# ============================================================
-# BASE INSTALLATION
-# ============================================================
-echo ""
-echo -e "${GREEN}=== Installing base system (15-30 minutes) ===${NC}"
-
-# Faster mirrors
-# Replace with:
-pacman -Sy --noconfirm reflector || echo "Reflector install failed, using default mirrors"
-if command -v reflector &>/dev/null; then
-    reflector --latest 10 --protocol https --sort rate --save /etc/pacman.d/mirrorlist
+if [[ "$USB_DEV" =~ nvme|mmcblk ]]; then
+  EFI_PART="${USB_DEV}p1"
+  ROOT_PART="${USB_DEV}p2"
+else
+  EFI_PART="${USB_DEV}1"
+  ROOT_PART="${USB_DEV}2"
 fi
 
-# Install packages
-pacstrap -K /mnt base base-devel linux-zen linux-zen-headers linux-firmware \
-    lvm2 cryptsetup vim sudo networkmanager git curl \
-    amd-ucode intel-ucode pipewire pipewire-pulse wireplumber \
-    xdg-desktop-portal-gnome
+echo -e "${YELLOW}Creating filesystems...${NC}"
+mkfs.fat -F 32 -n ARCHUSBEFI "$EFI_PART"
+printf '%s' "$LUKS_PASS" | cryptsetup luksFormat --type luks2 --pbkdf argon2id "$ROOT_PART" -
+printf '%s' "$LUKS_PASS" | cryptsetup open "$ROOT_PART" cryptroot -
+mkfs.ext4 -L ARCHUSBROOT /dev/mapper/cryptroot
 
-# Generate fstab
+echo -e "${YELLOW}Mounting target system...${NC}"
+mount /dev/mapper/cryptroot /mnt
+mkdir -p /mnt/boot
+mount "$EFI_PART" /mnt/boot
+
+echo -e "${YELLOW}Installing base system...${NC}"
+pacstrap -K /mnt \
+  base base-devel \
+  linux linux-headers linux-firmware \
+  grub efibootmgr \
+  cryptsetup mkinitcpio \
+  sudo networkmanager \
+  git curl vim nano \
+  gnome gdm firefox \
+  pipewire pipewire-pulse wireplumber \
+  xdg-desktop-portal-gnome \
+  intel-ucode amd-ucode \
+  reflector man-db man-pages texinfo bash-completion
+
 genfstab -U /mnt >> /mnt/etc/fstab
+ROOT_UUID="$(blkid -s UUID -o value "$ROOT_PART")"
 
-# ============================================================
-# CHROOT CONFIGURATION
-# ============================================================
-echo ""
-echo -e "${GREEN}=== Configuring system ===${NC}"
+export ROOT_UUID HOSTNAME TIMEZONE LOCALE KEYMAP USERNAME USER_PASS ROOT_PASS
 
-arch-chroot /mnt /bin/bash << CHROOT
-set -e
+arch-chroot /mnt /usr/bin/env \
+  ROOT_UUID="$ROOT_UUID" \
+  HOSTNAME="$HOSTNAME" \
+  TIMEZONE="$TIMEZONE" \
+  LOCALE="$LOCALE" \
+  KEYMAP="$KEYMAP" \
+  USERNAME="$USERNAME" \
+  USER_PASS="$USER_PASS" \
+  ROOT_PASS="$ROOT_PASS" \
+  /bin/bash <<'CHROOT'
+set -Eeuo pipefail
 
-# Timezone
-ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
+ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
 hwclock --systohc
 
-# Locale
-echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen
+if grep -Eq "^#?${LOCALE//./\\.}[[:space:]]+UTF-8" /etc/locale.gen; then
+  sed -i "s/^#\?\(${LOCALE//./\\.}[[:space:]]\+UTF-8\)/\1/" /etc/locale.gen
+else
+  echo "${LOCALE} UTF-8" >> /etc/locale.gen
+fi
 locale-gen
-echo "LANG=en_US.UTF-8" > /etc/locale.conf
-echo "KEYMAP=us" > /etc/vconsole.conf
 
-# Hostname
+echo "LANG=$LOCALE" > /etc/locale.conf
+echo "KEYMAP=$KEYMAP" > /etc/vconsole.conf
+
 echo "$HOSTNAME" > /etc/hostname
+cat > /etc/hosts <<HOSTS
+127.0.0.1   localhost
+::1         localhost
+127.0.1.1   ${HOSTNAME}.localdomain ${HOSTNAME}
+HOSTS
 
-# Users (using USER_PASS for login)
-echo "root:$USER_PASS" | chpasswd
-useradd -m -G wheel,audio,video,storage,optical,network,power -s /bin/bash $USERNAME
+echo "root:$ROOT_PASS" | chpasswd
+useradd -m -G wheel -s /bin/bash "$USERNAME"
 echo "$USERNAME:$USER_PASS" | chpasswd
-echo "%wheel ALL=(ALL:ALL) ALL" > /etc/sudoers.d/wheel
+install -d -m 0750 /etc/sudoers.d
+echo '%wheel ALL=(ALL:ALL) ALL' > /etc/sudoers.d/10-wheel
+chmod 440 /etc/sudoers.d/10-wheel
 
-# Initramfs with encryption support
-cat > /etc/mkinitcpio.conf << EOF
-MODULES=(nvme aesni_intel)
-BINARIES=()
-FILES=()
-HOOKS=(base systemd autodetect microcode modconf kms keyboard sd-vconsole sd-encrypt block filesystems fsck)
-COMPRESSION=(zstd)
-EOF
+sed -i 's/^HOOKS=.*/HOOKS=(base systemd autodetect microcode modconf kms keyboard sd-vconsole block sd-encrypt filesystems fsck)/' /etc/mkinitcpio.conf
 mkinitcpio -P
 
-# systemd-boot
-bootctl --esp-path=/boot install
-cat > /boot/loader/loader.conf << EOF
-default arch.conf
-timeout 3
-EOF
+sed -i 's/^GRUB_TIMEOUT=.*/GRUB_TIMEOUT=3/' /etc/default/grub
+if grep -q '^GRUB_CMDLINE_LINUX=' /etc/default/grub; then
+  sed -i "s|^GRUB_CMDLINE_LINUX=.*|GRUB_CMDLINE_LINUX=\"rd.luks.name=${ROOT_UUID}=cryptroot root=/dev/mapper/cryptroot rw quiet\"|" /etc/default/grub
+else
+  echo "GRUB_CMDLINE_LINUX=\"rd.luks.name=${ROOT_UUID}=cryptroot root=/dev/mapper/cryptroot rw quiet\"" >> /etc/default/grub
+fi
+if grep -q '^#\?GRUB_ENABLE_CRYPTODISK=' /etc/default/grub; then
+  sed -i 's/^#\?GRUB_ENABLE_CRYPTODISK=.*/GRUB_ENABLE_CRYPTODISK=y/' /etc/default/grub
+else
+  echo 'GRUB_ENABLE_CRYPTODISK=y' >> /etc/default/grub
+fi
 
-# Get UUIDs for kernel command line
-SYS_UUID=\$(blkid -s UUID -o value $SYSTEM_LUKS)
-HOME_UUID=\$(blkid -s UUID -o value $HOME_LUKS)
+grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=ARCHUSB --removable --recheck
+grub-mkconfig -o /boot/grub/grub.cfg
 
-cat > /boot/loader/entries/arch.conf << EOF
-title   Arch Linux (GNOME)
-linux   /vmlinuz-linux-zen
-initrd  /initramfs-linux-zen.img
-options rd.luks.name=\$SYS_UUID=cryptsys rd.luks.name=\$HOME_UUID=crypthome root=/dev/mapper/cryptsys rootflags=noatime quiet rw
-EOF
-
-# Enable services
 systemctl enable NetworkManager
-systemctl enable systemd-resolved
-ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
-
-# Flash memory optimization
-mkdir -p /etc/systemd/journald.conf.d/
-cat > /etc/systemd/journald.conf.d/usb.conf << EOF
-[Journal]
-Storage=volatile
-RuntimeMaxUse=100M
-EOF
-
-# Add noatime and trim
-sed -i 's/defaults/defaults,noatime,discard=async/' /etc/fstab
+systemctl enable gdm
 systemctl enable fstrim.timer
 
-# Install GNOME
-pacman -S --noconfirm gnome gnome-tweaks gdm firefox
-systemctl enable gdm
+mkdir -p /etc/systemd/journald.conf.d
+cat > /etc/systemd/journald.conf.d/usb.conf <<JEOF
+[Journal]
+Storage=volatile
+RuntimeMaxUse=64M
+JEOF
 
-# GDM stability fix for USB boot
-mkdir -p /etc/systemd/system/gdm.service.d/
-cat > /etc/systemd/system/gdm.service.d/wait-for-usb.conf << GDM
-[Service]
-ExecStartPre=/bin/sleep 2
-GDM
+sed -i '/[[:space:]]\/[[:space:]]/ s/,relatime//; /[[:space:]]\/[[:space:]]/ s/defaults/defaults,noatime/' /etc/fstab
+sed -i '/[[:space:]]\/boot[[:space:]]/ s/,relatime//; /[[:space:]]\/boot[[:space:]]/ s/defaults/defaults,noatime/' /etc/fstab
 
-# Install paru (AUR helper)
-git clone https://aur.archlinux.org/paru.git /home/$USERNAME/paru
-chown -R $USERNAME:$USERNAME /home/$USERNAME/paru
-cd /home/$USERNAME/paru
-sudo -u $USERNAME makepkg -si --noconfirm
-cd / && rm -rf /home/$USERNAME/paru
-
+sudo -u "$USERNAME" bash <<'UEOF'
+set -Eeuo pipefail
+cd /tmp
+git clone https://aur.archlinux.org/paru.git
+cd paru
+makepkg -si --noconfirm
+UEOF
 CHROOT
 
-# ============================================================
-# CLEANUP
-# ============================================================
-echo ""
-echo -e "${GREEN}=== Cleaning up ===${NC}"
-umount -R /mnt
-cryptsetup close crypthome
-cryptsetup close cryptsys
+sync
+cleanup_mounts
 
-echo ""
 echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}✅ INSTALLATION COMPLETE!${NC}"
+echo -e "${GREEN}Install complete.${NC}"
 echo -e "${GREEN}========================================${NC}"
-echo ""
-echo "SUMMARY:"
-echo "  LUKS passphrase: [the one you entered for disk encryption]"
-echo "  User login:      $USERNAME / [your user password]"
-echo ""
-echo "NEXT STEPS:"
-echo "  1. Remove the Arch ISO USB"
-echo "  2. Reboot"
-echo "  3. Boot from your SanDisk"
-echo "  4. Enter LUKS passphrase TWICE"
-echo "  5. Login with your username and password"
-echo ""
+echo
+echo "Next steps:"
+echo "  1. Reboot"
+echo "  2. Remove the Arch ISO USB"
+echo "  3. Boot the target USB in UEFI mode"
+echo "  4. Enter your LUKS passphrase once"
+echo "  5. Log in as $USERNAME"
