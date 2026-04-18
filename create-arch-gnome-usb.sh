@@ -1,77 +1,81 @@
 #!/bin/bash
 # Arch Linux + GNOME + LUKS USB Installer
-# FIXED: Works when Arch ISO is on /dev/sdb and target USB is /dev/sda
-# No assumptions about device names - always prompts user
+# DEBUGGED VERSION - No auto-detection, pure manual entry
 
 set -e
 
 # ============================================================
-# COLOR CODES FOR BETTER OUTPUT
+# COLORS
 # ============================================================
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-echo -e "${GREEN}=== Arch Linux USB Installer ===${NC}"
+clear
+echo -e "${GREEN}========================================${NC}"
+echo -e "${GREEN}    Arch Linux USB Installer v2.0${NC}"
+echo -e "${GREEN}========================================${NC}"
 echo ""
 
 # ============================================================
-# STEP 1: IDENTIFY ALL USB DRIVES
+# STEP 1: SHOW ALL DRIVES
 # ============================================================
-echo -e "${YELLOW}Detecting drives...${NC}"
+echo -e "${YELLOW}=== ALL DETECTED DRIVES ===${NC}"
 echo ""
-lsblk -o NAME,MODEL,SIZE,TYPE,MOUNTPOINT | grep -E "NAME|disk|part"
+lsblk -o NAME,MODEL,SIZE,TYPE
 echo ""
-
-# Identify which USB is the Arch ISO (boot drive)
-echo -e "${YELLOW}Identifying boot drive (Arch ISO)...${NC}"
-BOOT_DEVICE=$(findmnt -n -o SOURCE / | sed 's/[0-9]*$//')
-echo -e "Boot drive: ${GREEN}$BOOT_DEVICE${NC}"
+echo -e "${YELLOW}=== DETAILED PARTITION INFO ===${NC}"
 echo ""
-
-# Show the remaining USB drives as candidates
-echo -e "${YELLOW}Available target USB drives (excluding boot drive):${NC}"
-lsblk -o NAME,MODEL,SIZE -d | grep -v "$(basename "$BOOT_DEVICE")" | grep -E "sd|nvme"
+lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT
 echo ""
 
 # ============================================================
-# STEP 2: PROMPT FOR TARGET USB
+# STEP 2: MANUAL USB SELECTION
 # ============================================================
-echo -e "${YELLOW}Which USB do you want to INSTALL Arch on?${NC}"
-echo "  (This will be DESTROYED and become your portable Arch USB)"
+echo -e "${YELLOW}Which drive do you want to INSTALL Arch on?${NC}"
+echo -e "${RED}⚠️  This drive will be COMPLETELY WIPED ⚠️${NC}"
 echo ""
-read -p "Enter device name (e.g., /dev/sda): " USB_DEV
+read -p "Enter FULL device path (e.g., /dev/sda): " USB_DEV
 
-# Validate
+# Trim any whitespace
+USB_DEV=$(echo "$USB_DEV" | xargs)
+
+# Check if empty
+if [ -z "$USB_DEV" ]; then
+    echo -e "${RED}ERROR: No device entered.${NC}"
+    exit 1
+fi
+
+# Check if exists
 if [ ! -b "$USB_DEV" ]; then
-    echo -e "${RED}ERROR: $USB_DEV does not exist${NC}"
+    echo -e "${RED}ERROR: $USB_DEV does NOT exist!${NC}"
+    echo ""
+    echo "Available devices are:"
+    lsblk -d -o NAME,SIZE,TYPE | grep disk
     exit 1
 fi
 
-# Double-check it's not the boot drive
-if [ "$USB_DEV" = "$BOOT_DEVICE" ]; then
-    echo -e "${RED}ERROR: $USB_DEV is your BOOT drive (Arch ISO). You cannot install to it while running from it!${NC}"
-    echo "Please select the OTHER USB drive."
-    exit 1
-fi
-
-# Show what will be destroyed
+# ============================================================
+# STEP 3: WARNING AND CONFIRMATION
+# ============================================================
 echo ""
-echo -e "${RED}⚠️  WARNING: This will DESTROY ALL DATA on:${NC}"
+echo -e "${RED}⚠️  YOU HAVE SELECTED:${NC}"
 lsblk -o NAME,MODEL,SIZE "$USB_DEV"
+echo ""
+echo -e "${RED}ALL DATA ON THIS DRIVE WILL BE DESTROYED!${NC}"
 echo ""
 read -p "Type 'YES' to continue: " confirm
 if [ "$confirm" != "YES" ]; then
-    echo "Aborted."
-    exit 1
+    echo "Installation cancelled."
+    exit 0
 fi
 
 # ============================================================
-# STEP 3: PROMPT FOR USER INFORMATION
+# STEP 4: USER INFO
 # ============================================================
 echo ""
-echo -e "${GREEN}=== User Configuration ===${NC}"
+echo -e "${GREEN}=== User Setup ===${NC}"
 read -p "Enter username: " USERNAME
 
 while true; do
@@ -82,7 +86,7 @@ while true; do
     if [ "$PASSWORD" = "$PASSWORD2" ] && [ -n "$PASSWORD" ]; then
         break
     else
-        echo -e "${RED}Passwords do not match or are empty. Try again.${NC}"
+        echo -e "${RED}Passwords do not match or empty. Try again.${NC}"
     fi
 done
 
@@ -92,78 +96,84 @@ TIMEZONE="${TIMEZONE:-UTC}"
 read -p "Enter hostname [arch-usb]: " HOSTNAME
 HOSTNAME="${HOSTNAME:-arch-usb}"
 
-read -p "Enter keymap [us]: " KEYMAP
-KEYMAP="${KEYMAP:-us}"
-
-# Summary
+# ============================================================
+# STEP 5: FINAL SUMMARY
+# ============================================================
 echo ""
-echo -e "${GREEN}=== Installation Summary ===${NC}"
-echo "Target USB:     $USB_DEV ($(lsblk -o MODEL,SIZE "$USB_DEV" | tail -1))"
+echo -e "${GREEN}=== INSTALLATION SUMMARY ===${NC}"
+echo "Target drive:   $USB_DEV"
 echo "Username:       $USERNAME"
 echo "Hostname:       $HOSTNAME"
 echo "Timezone:       $TIMEZONE"
-echo "Keymap:         $KEYMAP"
 echo ""
-read -p "Proceed with installation? (yes/no): " proceed
-if [ "$proceed" != "yes" ]; then
-    echo "Aborted."
-    exit 1
+read -p "Start installation? (yes/no): " start
+if [ "$start" != "yes" ]; then
+    echo "Cancelled."
+    exit 0
 fi
 
 # ============================================================
-# STEP 4: BEGIN INSTALLATION
+# STEP 6: BEGIN INSTALLATION
 # ============================================================
 echo ""
-echo -e "${GREEN}=== Starting installation on $USB_DEV ===${NC}"
+echo -e "${GREEN}=== Starting installation ===${NC}"
 
-# Unmount anything on the target USB
-echo "Unmounting any existing partitions..."
+# Unmount anything on the target
+echo "Cleaning target drive..."
 umount "${USB_DEV}"* 2>/dev/null || true
 
-# Wipe the first few MB to ensure clean state
+# Wipe the drive
 echo "Wiping partition table..."
-dd if=/dev/zero of="$USB_DEV" bs=1M count=10 status=progress
+dd if=/dev/zero of="$USB_DEV" bs=1M count=10 status=progress 2>/dev/null
 
 # Create partitions
 echo "Creating partitions..."
-parted "$USB_DEV" mklabel gpt
-parted "$USB_DEV" mkpart primary fat32 1MiB 513MiB
-parted "$USB_DEV" set 1 esp on
-parted "$USB_DEV" mkpart primary 513MiB 41GiB
-parted "$USB_DEV" mkpart primary 41GiB 100%
+parted -s "$USB_DEV" mklabel gpt
+parted -s "$USB_DEV" mkpart primary fat32 1MiB 513MiB
+parted -s "$USB_DEV" set 1 esp on
+parted -s "$USB_DEV" mkpart primary 513MiB 41GiB
+parted -s "$USB_DEV" mkpart primary 41GiB 100%
 sleep 2
 
 EFI_PART="${USB_DEV}1"
 SYSTEM_LUKS="${USB_DEV}2"
 HOME_LUKS="${USB_DEV}3"
 
-echo "Partitions created:"
+# Verify partitions were created
+if [ ! -b "$EFI_PART" ] || [ ! -b "$SYSTEM_LUKS" ] || [ ! -b "$HOME_LUKS" ]; then
+    echo -e "${RED}ERROR: Partition creation failed!${NC}"
+    lsblk "$USB_DEV"
+    exit 1
+fi
+
+echo "Partitions created successfully:"
 lsblk "$USB_DEV"
 
 # ============================================================
-# STEP 5: LUKS ENCRYPTION
+# STEP 7: ENCRYPTION
 # ============================================================
 echo ""
 echo -e "${GREEN}=== Setting up LUKS encryption ===${NC}"
+
 echo "Encrypting system partition..."
 echo -n "$PASSWORD" | cryptsetup luksFormat --type luks2 \
     --cipher aes-256-gcm \
     --pbkdf argon2id \
     --iter-time 2000 \
-    "$SYSTEM_LUKS" -
+    "$SYSTEM_LUKS" - || { echo -e "${RED}Encryption failed!${NC}"; exit 1; }
 
 echo "Encrypting home partition..."
 echo -n "$PASSWORD" | cryptsetup luksFormat --type luks2 \
     --cipher aes-256-gcm \
     --pbkdf argon2id \
-    "$HOME_LUKS" -
+    "$HOME_LUKS" - || { echo -e "${RED}Encryption failed!${NC}"; exit 1; }
 
 echo "Opening encrypted partitions..."
 echo -n "$PASSWORD" | cryptsetup open "$SYSTEM_LUKS" cryptsys -
 echo -n "$PASSWORD" | cryptsetup open "$HOME_LUKS" crypthome -
 
 # ============================================================
-# STEP 6: FORMATTING
+# STEP 8: FORMAT
 # ============================================================
 echo "Formatting partitions..."
 mkfs.fat -F32 "$EFI_PART"
@@ -171,7 +181,7 @@ mkfs.ext4 -O '^has_journal' /dev/mapper/cryptsys
 mkfs.ext4 -O '^has_journal' /dev/mapper/crypthome
 
 # ============================================================
-# STEP 7: MOUNTING
+# STEP 9: MOUNT
 # ============================================================
 echo "Mounting partitions..."
 mount /dev/mapper/cryptsys /mnt
@@ -180,40 +190,31 @@ mount /dev/mapper/crypthome /mnt/home
 mount "$EFI_PART" /mnt/boot
 
 # ============================================================
-# STEP 8: BASE INSTALLATION
+# STEP 10: BASE INSTALLATION
 # ============================================================
 echo ""
-echo -e "${GREEN}=== Installing base system (this takes ~10-15 minutes) ===${NC}"
+echo -e "${GREEN}=== Installing base system (15-30 minutes) ===${NC}"
 
-# Update mirrorlist for faster downloads
-echo "Updating mirrors..."
-pacman -Sy --noconfirm reflector
-reflector --latest 20 --protocol https --sort rate --save /etc/pacman.d/mirrorlist
+# Set up faster mirrors
+pacman -Sy --noconfirm reflector 2>/dev/null
+reflector --latest 10 --protocol https --sort rate --save /etc/pacman.d/mirrorlist 2>/dev/null
 
-# Install base packages
-echo "Installing base packages..."
-pacstrap -K /mnt \
-    base base-devel linux-zen linux-zen-headers \
-    linux-firmware sof-firmware \
-    lvm2 cryptsetup \
-    vim nano sudo \
-    networkmanager iwd wpa_supplicant \
-    git curl wget \
-    efitools sbctl \
-    amd-ucode intel-ucode \
-    pipewire pipewire-pulse wireplumber \
+# Install
+pacstrap -K /mnt base base-devel linux-zen linux-zen-headers linux-firmware \
+    lvm2 cryptsetup vim sudo networkmanager git curl \
+    amd-ucode intel-ucode pipewire pipewire-pulse wireplumber \
     xdg-desktop-portal-gnome
 
 # Generate fstab
 genfstab -U /mnt >> /mnt/etc/fstab
 
 # ============================================================
-# STEP 9: CHROOT CONFIGURATION
+# STEP 11: CHROOT
 # ============================================================
 echo ""
 echo -e "${GREEN}=== Configuring system ===${NC}"
 
-cat << CHROOT | arch-chroot /mnt /bin/bash
+arch-chroot /mnt /bin/bash << CHROOT
 set -e
 
 # Timezone
@@ -224,91 +225,73 @@ hwclock --systohc
 echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen
 locale-gen
 echo "LANG=en_US.UTF-8" > /etc/locale.conf
-echo "KEYMAP=$KEYMAP" > /etc/vconsole.conf
+echo "KEYMAP=us" > /etc/vconsole.conf
 
 # Hostname
 echo "$HOSTNAME" > /etc/hostname
-cat > /etc/hosts << HOSTS
-127.0.0.1   localhost
-::1         localhost
-127.0.1.1   $HOSTNAME.localdomain $HOSTNAME
-HOSTS
 
-# Set passwords
+# Users
 echo "root:$PASSWORD" | chpasswd
 useradd -m -G wheel,audio,video,storage,optical,network,power -s /bin/bash $USERNAME
 echo "$USERNAME:$PASSWORD" | chpasswd
 echo "%wheel ALL=(ALL:ALL) ALL" > /etc/sudoers.d/wheel
 
-# Initramfs with LUKS support
-cat > /etc/mkinitcpio.conf << MKINIT
+# Initramfs
+cat > /etc/mkinitcpio.conf << EOF
 MODULES=(nvme)
 BINARIES=()
 FILES=()
 HOOKS=(base systemd autodetect microcode modconf kms keyboard sd-vconsole sd-encrypt block filesystems fsck)
 COMPRESSION=(zstd)
-MKINIT
+EOF
 mkinitcpio -P
 
-# Install systemd-boot
+# Bootloader
 bootctl --esp-path=/boot install
-
-# Bootloader config
-cat > /boot/loader/loader.conf << LOADER
+cat > /boot/loader/loader.conf << EOF
 default arch.conf
 timeout 3
-console-mode max
-LOADER
+EOF
 
-# Get UUIDs for kernel command line
 SYS_UUID=\$(blkid -s UUID -o value $SYSTEM_LUKS)
 HOME_UUID=\$(blkid -s UUID -o value $HOME_LUKS)
 
-# Create boot entry
-cat > /boot/loader/entries/arch.conf << ENTRY
-title   Arch Linux (GNOME + LUKS)
+cat > /boot/loader/entries/arch.conf << EOF
+title   Arch Linux (GNOME)
 linux   /vmlinuz-linux-zen
 initrd  /initramfs-linux-zen.img
 options rd.luks.name=\$SYS_UUID=cryptsys rd.luks.name=\$HOME_UUID=crypthome root=/dev/mapper/cryptsys rootflags=noatime quiet rw
-ENTRY
+EOF
 
-# Enable services
-systemctl enable NetworkManager
-systemctl enable systemd-resolved
+# Services
+systemctl enable NetworkManager systemd-resolved
 ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
 
-# Flash memory optimization (RAM-only journal)
+# Flash tuning
 mkdir -p /etc/systemd/journald.conf.d/
-cat > /etc/systemd/journald.conf.d/usb-stick.conf << JOURNAL
+cat > /etc/systemd/journald.conf.d/usb.conf << EOF
 [Journal]
 Storage=volatile
 RuntimeMaxUse=100M
-JOURNAL
-
-# Add noatime to fstab and enable trim
+EOF
 sed -i 's/defaults/defaults,noatime,discard=async/' /etc/fstab
 systemctl enable fstrim.timer
 
-# Install GNOME
+# GNOME
 pacman -S --noconfirm gnome gnome-tweaks gdm firefox
-
-# Enable display manager
 systemctl enable gdm
 
-# Install paru (AUR helper)
+# paru
 git clone https://aur.archlinux.org/paru.git /home/$USERNAME/paru
 chown -R $USERNAME:$USERNAME /home/$USERNAME/paru
 cd /home/$USERNAME/paru
 sudo -u $USERNAME makepkg -si --noconfirm
 cd / && rm -rf /home/$USERNAME/paru
 
-# GNOME performance tuning for USB
-sudo -u $USERNAME gsettings set org.gnome.desktop.interface enable-animations false
-
 CHROOT
 
 # ============================================================
-# STEP 10: CLEANUP
+# STEP 12: CLEANUP
 # ============================================================
 echo ""
 echo -e "${GREEN}=== Cleaning up ===${NC}"
@@ -317,17 +300,13 @@ cryptsetup close crypthome
 cryptsetup close cryptsys
 
 echo ""
-echo -e "${GREEN}=========================================="
-echo "✅ INSTALLATION COMPLETE!"
-echo "==========================================${NC}"
+echo -e "${GREEN}========================================${NC}"
+echo -e "${GREEN}✅ INSTALLATION COMPLETE!${NC}"
+echo -e "${GREEN}========================================${NC}"
 echo ""
-echo "Next steps:"
-echo "1. Remove the Arch ISO USB (the small one)"
-echo "2. Keep ONLY your SanDisk Extreme PRO inserted"
-echo "3. Reboot your computer"
-echo "4. Enter boot menu (F12/F9/ESC) and select your SanDisk"
-echo "5. Enter your LUKS password TWICE (system + home)"
-echo "6. Login with: $USERNAME / [your password]"
-echo ""
-echo -e "${YELLOW}First boot may take 1-2 minutes while GNOME initializes.${NC}"
+echo "1. Remove the Arch ISO USB"
+echo "2. Reboot"
+echo "3. Boot from your SanDisk"
+echo "4. Enter LUKS password TWICE"
+echo "5. Login: $USERNAME"
 echo ""
