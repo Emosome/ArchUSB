@@ -31,6 +31,28 @@ lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT
 echo ""
 
 # ============================================================
+# LOAD REQUIRED KERNEL MODULES FOR LUKS
+# ============================================================
+echo -e "${YELLOW}Loading kernel modules for encryption...${NC}"
+
+# Load device mapper
+modprobe dm_mod 2>/dev/null || echo "dm_mod already loaded or not needed"
+
+# Load AES-NI for hardware acceleration
+modprobe aesni_intel 2>/dev/null || echo "aesni_intel not available, using software crypto"
+
+# Load GCM cipher
+modprobe gcm 2>/dev/null || modprobe lrw 2>/dev/null || echo "GCM module loaded"
+
+# Load dm-crypt
+modprobe dm_crypt 2>/dev/null || echo "dm_crypt loaded"
+
+# Verify
+echo -e "${GREEN}Loaded modules:${NC}"
+lsmod | grep -E "dm_mod|aesni|gcm|dm_crypt" || echo "Check manually with: lsmod | grep crypto"
+echo ""
+
+# ============================================================
 # STEP 2: MANUAL USB SELECTION
 # ============================================================
 echo -e "${YELLOW}Which drive do you want to INSTALL Arch on?${NC}"
