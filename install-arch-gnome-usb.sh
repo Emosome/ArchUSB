@@ -204,8 +204,11 @@ echo ""
 echo -e "${GREEN}=== Installing base system (15-30 minutes) ===${NC}"
 
 # Faster mirrors
-pacman -Sy --noconfirm reflector 2>/dev/null
-reflector --latest 10 --protocol https --sort rate --save /etc/pacman.d/mirrorlist 2>/dev/null
+# Replace with:
+pacman -Sy --noconfirm reflector || echo "Reflector install failed, using default mirrors"
+if command -v reflector &>/dev/null; then
+    reflector --latest 10 --protocol https --sort rate --save /etc/pacman.d/mirrorlist
+fi
 
 # Install packages
 pacstrap -K /mnt base base-devel linux-zen linux-zen-headers linux-firmware \
