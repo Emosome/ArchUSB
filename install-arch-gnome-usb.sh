@@ -6,7 +6,11 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-trap 'echo -e "${RED}ERROR:${NC} Install failed on line $LINENO. Review the last command output."' ERR
+LOGFILE="/root/arch-usb-install.log"
+
+exec > >(tee -a "$LOGFILE") 2>&1
+
+trap 'echo -e "${RED}ERROR:${NC} Install failed on line $LINENO. Review $LOGFILE and the last command output."' ERR
 
 require_root() {
   if [[ ${EUID} -ne 0 ]]; then
@@ -24,7 +28,7 @@ require_uefi() {
 
 require_cmds() {
   local missing=0
-  for cmd in arch-chroot blkid cryptsetup genfstab lsblk mount pacman pacstrap parted partprobe sgdisk systemctl umount wipefs; do
+  for cmd in arch-chroot blkid cryptsetup genfstab lsblk mount pacman pacstrap parted partprobe sgdisk systemctl umount wipefs awk tee; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
       echo -e "${RED}Missing required command:${NC} $cmd"
       missing=1
@@ -61,8 +65,9 @@ cleanup_mounts
 
 clear
 printf "%b\n" "${GREEN}========================================${NC}"
-printf "%b\n" "${GREEN}   Arch Linux USB Installer v7.0${NC}"
+printf "%b\n" "${GREEN}   Arch Linux USB Installer v8.0${NC}"
 printf "%b\n" "${GREEN}========================================${NC}"
+printf "%b\n" "${YELLOW}Log file:${NC} $LOGFILE"
 printf "\n"
 
 echo -e "${YELLOW}Detected block devices:${NC}"
@@ -148,28 +153,26 @@ pacstrap -K /mnt \
   cryptsetup mkinitcpio \
   sudo networkmanager \
   git curl vim nano \
-  gnome gdm firefox \
-  pipewire pipewire-pulse wireplumber \
-  xdg-desktop-portal-gnome \
   intel-ucode amd-ucode \
   reflector man-db man-pages texinfo bash-completion
 
 genfstab -U /mnt >> /mnt/etc/fstab
 ROOT_UUID="$(blkid -s UUID -o value "$ROOT_PART")"
 
-export ROOT_UUID HOSTNAME TIMEZONE LOCALE KEYMAP USERNAME USER_PASS ROOT_PASS
-
-arch-chroot /mnt /usr/bin/env \
-  ROOT_UUID="$ROOT_UUID" \
-  HOSTNAME="$HOSTNAME" \
-  TIMEZONE="$TIMEZONE" \
-  LOCALE="$LOCALE" \
-  KEYMAP="$KEYMAP" \
-  USERNAME="$USERNAME" \
-  USER_PASS="$USER_PASS" \
-  ROOT_PASS="$ROOT_PASS" \
-  /bin/bash <<'CHROOT'
+cat > /mnt/root/postinstall.sh <<'POSTINSTALL'
+#!/usr/bin/env bash
 set -Eeuo pipefail
+
+trap 'echo "POSTINSTALL ERROR on line $LINENO"; exit 1' ERR
+
+: "${ROOT_UUID:?}"
+: "${HOSTNAME:?}"
+: "${TIMEZONE:?}"
+: "${LOCALE:?}"
+: "${KEYMAP:?}"
+: "${USERNAME:?}"
+: "${USER_PASS:?}"
+: "${ROOT_PASS:?}"
 
 ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
 hwclock --systohc
@@ -192,8 +195,12 @@ cat > /etc/hosts <<HOSTS
 HOSTS
 
 echo "root:$ROOT_PASS" | chpasswd
-useradd -m -G wheel -s /bin/bash "$USERNAME"
+
+if ! id "$USERNAME" >/dev/null 2>&1; then
+  useradd -m -G wheel -s /bin/bash "$USERNAME"
+fi
 echo "$USERNAME:$USER_PASS" | chpasswd
+
 install -d -m 0750 /etc/sudoers.d
 echo '%wheel ALL=(ALL:ALL) ALL' > /etc/sudoers.d/10-wheel
 chmod 440 /etc/sudoers.d/10-wheel
@@ -207,6 +214,7 @@ if grep -q '^GRUB_CMDLINE_LINUX=' /etc/default/grub; then
 else
   echo "GRUB_CMDLINE_LINUX=\"rd.luks.name=${ROOT_UUID}=cryptroot root=/dev/mapper/cryptroot rw quiet\"" >> /etc/default/grub
 fi
+
 if grep -q '^#\?GRUB_ENABLE_CRYPTODISK=' /etc/default/grub; then
   sed -i 's/^#\?GRUB_ENABLE_CRYPTODISK=.*/GRUB_ENABLE_CRYPTODISK=y/' /etc/default/grub
 else
@@ -217,7 +225,6 @@ grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=ARCHUSB -
 grub-mkconfig -o /boot/grub/grub.cfg
 
 systemctl enable NetworkManager
-systemctl enable gdm
 systemctl enable fstrim.timer
 
 mkdir -p /etc/systemd/journald.conf.d
@@ -227,17 +234,57 @@ Storage=volatile
 RuntimeMaxUse=64M
 JEOF
 
-sed -i '/[[:space:]]\/[[:space:]]/ s/,relatime//; /[[:space:]]\/[[:space:]]/ s/defaults/defaults,noatime/' /etc/fstab
-sed -i '/[[:space:]]\/boot[[:space:]]/ s/,relatime//; /[[:space:]]\/boot[[:space:]]/ s/defaults/defaults,noatime/' /etc/fstab
+awk '
+$2 == "/" && $4 ~ /defaults/ { sub("defaults", "defaults,noatime", $4) }
+$2 == "/boot" && $4 ~ /defaults/ { sub("defaults", "defaults,noatime", $4) }
+{ print }
+' /etc/fstab > /etc/fstab.new && mv /etc/fstab.new /etc/fstab
+
+pacman -Syu --noconfirm
+pacman -S --noconfirm \
+  gnome gdm firefox \
+  pipewire pipewire-pulse wireplumber \
+  xdg-desktop-portal-gnome
+
+systemctl enable gdm.service
+
+pacman -Q gdm gnome-shell networkmanager >/dev/null
 
 sudo -u "$USERNAME" bash <<'UEOF'
 set -Eeuo pipefail
-cd /tmp
+workdir="$(mktemp -d)"
+cd "$workdir"
 git clone https://aur.archlinux.org/paru.git
 cd paru
-makepkg -si --noconfirm
+makepkg -sf --noconfirm
+pkgfile="$(find . -maxdepth 1 -type f -name 'paru-*.pkg.tar.*' | head -n1)"
+if [[ -z "${pkgfile:-}" ]]; then
+  echo "Failed to locate built paru package"
+  exit 1
+fi
+printf '%s' "$PWD/$pkgfile" > /tmp/paru_pkg_path
 UEOF
-CHROOT
+
+pacman -U --noconfirm "$(cat /tmp/paru_pkg_path)"
+rm -f /tmp/paru_pkg_path
+
+pacman -Q paru >/dev/null
+POSTINSTALL
+
+chmod +x /mnt/root/postinstall.sh
+
+arch-chroot /mnt /usr/bin/env \
+  ROOT_UUID="$ROOT_UUID" \
+  HOSTNAME="$HOSTNAME" \
+  TIMEZONE="$TIMEZONE" \
+  LOCALE="$LOCALE" \
+  KEYMAP="$KEYMAP" \
+  USERNAME="$USERNAME" \
+  USER_PASS="$USER_PASS" \
+  ROOT_PASS="$ROOT_PASS" \
+  /root/postinstall.sh
+
+arch-chroot /mnt pacman -Q gdm gnome-shell networkmanager paru >/dev/null
 
 sync
 cleanup_mounts
@@ -252,3 +299,5 @@ echo "  2. Remove the Arch ISO USB"
 echo "  3. Boot the target USB in UEFI mode"
 echo "  4. Enter your LUKS passphrase once"
 echo "  5. Log in as $USERNAME"
+echo
+echo "Install log saved to: $LOGFILE"
