@@ -1,6 +1,6 @@
 #!/bin/bash
 # Arch Linux + GNOME + LUKS USB Installer
-# WORKING VERSION - Uses aes-cbc-essiv:sha256 cipher
+# WORKING VERSION - Clean prompts, no /dev/tty issues
 
 set -e
 
@@ -12,7 +12,7 @@ NC='\033[0m'
 
 clear
 echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}    Arch Linux USB Installer v5.0${NC}"
+echo -e "${GREEN}    Arch Linux USB Installer v6.0${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo ""
 
@@ -28,24 +28,6 @@ echo -e "${GREEN}✓ Modules loaded${NC}"
 echo ""
 
 # ============================================================
-# FUNCTION FOR INPUT
-# ============================================================
-get_input() {
-    local prompt="$1"
-    local result
-    read -p "$prompt" result </dev/tty
-    echo "$result"
-}
-
-get_password() {
-    local prompt="$1"
-    local result
-    read -s -p "$prompt" result </dev/tty
-    echo
-    echo "$result"
-}
-
-# ============================================================
 # SHOW DRIVES
 # ============================================================
 echo -e "${YELLOW}=== ALL DETECTED DRIVES ===${NC}"
@@ -58,9 +40,7 @@ echo ""
 echo -e "${YELLOW}Which drive do you want to INSTALL Arch on?${NC}"
 echo -e "${RED}⚠️  This drive will be COMPLETELY WIPED ⚠️${NC}"
 echo ""
-
-USB_DEV=$(get_input "Enter FULL device path (e.g., /dev/sda): ")
-USB_DEV=$(echo "$USB_DEV" | xargs)
+read -p "Enter FULL device path (e.g., /dev/sda): " USB_DEV
 
 if [ -z "$USB_DEV" ]; then
     echo -e "${RED}ERROR: No device entered.${NC}"
@@ -81,8 +61,7 @@ lsblk -o NAME,MODEL,SIZE "$USB_DEV"
 echo ""
 echo -e "${RED}ALL DATA ON THIS DRIVE WILL BE DESTROYED!${NC}"
 echo ""
-
-confirm=$(get_input "Type 'YES' to continue: ")
+read -p "Type 'YES' to continue: " confirm
 if [ "$confirm" != "YES" ]; then
     echo "Installation cancelled."
     exit 0
@@ -93,24 +72,40 @@ fi
 # ============================================================
 echo ""
 echo -e "${GREEN}=== User Setup ===${NC}"
+read -p "Enter username: " USERNAME
 
-USERNAME=$(get_input "Enter username: ")
+echo ""
+read -s -p "Enter user password (for login): " USER_PASS
+echo ""
+read -s -p "Confirm user password: " USER_PASS2
+echo ""
+if [ "$USER_PASS" != "$USER_PASS2" ] || [ -z "$USER_PASS" ]; then
+    echo -e "${RED}Passwords do not match or empty. Exiting.${NC}"
+    exit 1
+fi
 
-while true; do
-    PASSWORD=$(get_password "Enter password: ")
-    PASSWORD2=$(get_password "Confirm password: ")
-    if [ "$PASSWORD" = "$PASSWORD2" ] && [ -n "$PASSWORD" ]; then
-        break
-    else
-        echo -e "${RED}Passwords do not match or empty. Try again.${NC}"
-    fi
-done
-
-TIMEZONE=$(get_input "Enter timezone (e.g., America/New_York) [UTC]: ")
+echo ""
+read -p "Enter timezone (e.g., America/New_York) [UTC]: " TIMEZONE
 TIMEZONE="${TIMEZONE:-UTC}"
 
-HOSTNAME=$(get_input "Enter hostname [arch-usb]: ")
+read -p "Enter hostname [arch-usb]: " HOSTNAME
 HOSTNAME="${HOSTNAME:-arch-usb}"
+
+# ============================================================
+# LUKS PASSPHRASE (CAN BE SAME OR DIFFERENT FROM USER PASSWORD)
+# ============================================================
+echo ""
+echo -e "${GREEN}=== LUKS Encryption Setup ===${NC}"
+echo -e "${YELLOW}This passphrase will be required EVERY TIME you boot the USB${NC}"
+echo ""
+read -s -p "Enter LUKS passphrase (for disk encryption): " LUKS_PASS
+echo ""
+read -s -p "Confirm LUKS passphrase: " LUKS_PASS2
+echo ""
+if [ "$LUKS_PASS" != "$LUKS_PASS2" ] || [ -z "$LUKS_PASS" ]; then
+    echo -e "${RED}Passphrases do not match or empty. Exiting.${NC}"
+    exit 1
+fi
 
 # ============================================================
 # SUMMARY
@@ -122,8 +117,7 @@ echo "Username:       $USERNAME"
 echo "Hostname:       $HOSTNAME"
 echo "Timezone:       $TIMEZONE"
 echo ""
-
-proceed=$(get_input "Start installation? (yes/no): ")
+read -p "Start installation? (yes/no): " proceed
 if [ "$proceed" != "yes" ]; then
     echo "Cancelled."
     exit 0
@@ -153,29 +147,32 @@ echo -e "${GREEN}✓ Partitions created${NC}"
 lsblk "$USB_DEV"
 
 # ============================================================
-# LUKS ENCRYPTION (USING WORKING CIPHER)
+# LUKS ENCRYPTION
 # ============================================================
 echo ""
 echo -e "${GREEN}=== Setting up LUKS encryption ===${NC}"
-echo -e "${YELLOW}Using aes-cbc-essiv:sha256 cipher (compatible)${NC}"
+echo -e "${YELLOW}Using aes-cbc-essiv:sha256 cipher${NC}"
 
+# System partition
 echo "Encrypting system partition..."
-echo -n "$PASSWORD" | cryptsetup luksFormat --type luks2 \
+echo -n "$LUKS_PASS" | cryptsetup luksFormat --type luks2 \
     --cipher aes-cbc-essiv:sha256 \
     --key-size 256 \
     --pbkdf argon2id \
     "$SYSTEM_LUKS" -
 
+# Home partition
 echo "Encrypting home partition..."
-echo -n "$PASSWORD" | cryptsetup luksFormat --type luks2 \
+echo -n "$LUKS_PASS" | cryptsetup luksFormat --type luks2 \
     --cipher aes-cbc-essiv:sha256 \
     --key-size 256 \
     --pbkdf argon2id \
     "$HOME_LUKS" -
 
+# Open partitions
 echo "Opening encrypted partitions..."
-echo -n "$PASSWORD" | cryptsetup open "$SYSTEM_LUKS" cryptsys -
-echo -n "$PASSWORD" | cryptsetup open "$HOME_LUKS" crypthome -
+echo -n "$LUKS_PASS" | cryptsetup open "$SYSTEM_LUKS" cryptsys -
+echo -n "$LUKS_PASS" | cryptsetup open "$HOME_LUKS" crypthome -
 
 echo -e "${GREEN}✓ Encryption complete${NC}"
 
@@ -201,18 +198,21 @@ mount "$EFI_PART" /mnt/boot
 echo ""
 echo -e "${GREEN}=== Installing base system (15-30 minutes) ===${NC}"
 
+# Faster mirrors
 pacman -Sy --noconfirm reflector 2>/dev/null
 reflector --latest 10 --protocol https --sort rate --save /etc/pacman.d/mirrorlist 2>/dev/null
 
+# Install packages
 pacstrap -K /mnt base base-devel linux-zen linux-zen-headers linux-firmware \
     lvm2 cryptsetup vim sudo networkmanager git curl \
     amd-ucode intel-ucode pipewire pipewire-pulse wireplumber \
     xdg-desktop-portal-gnome
 
+# Generate fstab
 genfstab -U /mnt >> /mnt/etc/fstab
 
 # ============================================================
-# CHROOT
+# CHROOT CONFIGURATION
 # ============================================================
 echo ""
 echo -e "${GREEN}=== Configuring system ===${NC}"
@@ -220,21 +220,26 @@ echo -e "${GREEN}=== Configuring system ===${NC}"
 arch-chroot /mnt /bin/bash << CHROOT
 set -e
 
+# Timezone
 ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
 hwclock --systohc
 
+# Locale
 echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen
 locale-gen
 echo "LANG=en_US.UTF-8" > /etc/locale.conf
 echo "KEYMAP=us" > /etc/vconsole.conf
 
+# Hostname
 echo "$HOSTNAME" > /etc/hostname
 
-echo "root:$PASSWORD" | chpasswd
+# Users (using USER_PASS for login)
+echo "root:$USER_PASS" | chpasswd
 useradd -m -G wheel,audio,video,storage,optical,network,power -s /bin/bash $USERNAME
-echo "$USERNAME:$PASSWORD" | chpasswd
+echo "$USERNAME:$USER_PASS" | chpasswd
 echo "%wheel ALL=(ALL:ALL) ALL" > /etc/sudoers.d/wheel
 
+# Initramfs with encryption support
 cat > /etc/mkinitcpio.conf << EOF
 MODULES=(nvme aesni_intel)
 BINARIES=()
@@ -244,12 +249,14 @@ COMPRESSION=(zstd)
 EOF
 mkinitcpio -P
 
+# systemd-boot
 bootctl --esp-path=/boot install
 cat > /boot/loader/loader.conf << EOF
 default arch.conf
 timeout 3
 EOF
 
+# Get UUIDs for kernel command line
 SYS_UUID=\$(blkid -s UUID -o value $SYSTEM_LUKS)
 HOME_UUID=\$(blkid -s UUID -o value $HOME_LUKS)
 
@@ -260,9 +267,12 @@ initrd  /initramfs-linux-zen.img
 options rd.luks.name=\$SYS_UUID=cryptsys rd.luks.name=\$HOME_UUID=crypthome root=/dev/mapper/cryptsys rootflags=noatime quiet rw
 EOF
 
-systemctl enable NetworkManager systemd-resolved
+# Enable services
+systemctl enable NetworkManager
+systemctl enable systemd-resolved
 ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
 
+# Flash memory optimization
 mkdir -p /etc/systemd/journald.conf.d/
 cat > /etc/systemd/journald.conf.d/usb.conf << EOF
 [Journal]
@@ -270,12 +280,15 @@ Storage=volatile
 RuntimeMaxUse=100M
 EOF
 
+# Add noatime and trim
 sed -i 's/defaults/defaults,noatime,discard=async/' /etc/fstab
 systemctl enable fstrim.timer
 
+# Install GNOME
 pacman -S --noconfirm gnome gnome-tweaks gdm firefox
 systemctl enable gdm
 
+# Install paru (AUR helper)
 git clone https://aur.archlinux.org/paru.git /home/$USERNAME/paru
 chown -R $USERNAME:$USERNAME /home/$USERNAME/paru
 cd /home/$USERNAME/paru
@@ -298,9 +311,14 @@ echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}✅ INSTALLATION COMPLETE!${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo ""
-echo "1. Remove the Arch ISO USB"
-echo "2. Reboot"
-echo "3. Boot from your SanDisk"
-echo "4. Enter LUKS password TWICE"
-echo "5. Login: $USERNAME"
+echo "SUMMARY:"
+echo "  LUKS passphrase: [the one you entered for disk encryption]"
+echo "  User login:      $USERNAME / [your user password]"
+echo ""
+echo "NEXT STEPS:"
+echo "  1. Remove the Arch ISO USB"
+echo "  2. Reboot"
+echo "  3. Boot from your SanDisk"
+echo "  4. Enter LUKS passphrase TWICE"
+echo "  5. Login with your username and password"
 echo ""
