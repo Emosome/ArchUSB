@@ -159,28 +159,25 @@ lsblk "$USB_DEV"
 # ============================================================
 echo ""
 echo -e "${GREEN}=== Setting up LUKS encryption ===${NC}"
-echo -e "${YELLOW}Using aes-256-gcm (authenticated encryption, hardware accelerated)${NC}"
+echo -e "${YELLOW}Using LUKS2 with AES-XTS and Argon2id${NC}"
 
-# System partition
 echo "Encrypting system partition..."
-echo -n "$LUKS_PASS" | cryptsetup luksFormat --type luks2 \
-    --cipher aes-256-gcm \
-    --key-size 256 \
+printf '%s' "$LUKS_PASS" | cryptsetup luksFormat --type luks2 \
+    --cipher aes-xts-plain64 \
+    --key-size 512 \
     --pbkdf argon2id \
     "$SYSTEM_LUKS" -
 
-# Home partition
 echo "Encrypting home partition..."
-echo -n "$LUKS_PASS" | cryptsetup luksFormat --type luks2 \
-    --cipher aes-256-gcm \
-    --key-size 256 \
+printf '%s' "$LUKS_PASS" | cryptsetup luksFormat --type luks2 \
+    --cipher aes-xts-plain64 \
+    --key-size 512 \
     --pbkdf argon2id \
     "$HOME_LUKS" -
 
-# Open partitions
 echo "Opening encrypted partitions..."
-echo -n "$LUKS_PASS" | cryptsetup open "$SYSTEM_LUKS" cryptsys -
-echo -n "$LUKS_PASS" | cryptsetup open "$HOME_LUKS" crypthome -
+printf '%s' "$LUKS_PASS" | cryptsetup open "$SYSTEM_LUKS" cryptsys -
+printf '%s' "$LUKS_PASS" | cryptsetup open "$HOME_LUKS" crypthome -
 
 echo -e "${GREEN}✓ Encryption complete${NC}"
 
