@@ -22,7 +22,8 @@ chmod +x /root/install.sh
 
 
 
-Post-install commands (DO THIS)
+
+**Post-install commands (DO THIS)**
 1. Create swap subvolume
 sudo btrfs subvolume create /swap
 2. Create swap file (20GB)
