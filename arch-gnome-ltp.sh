@@ -292,25 +292,35 @@ if [[ "$ENABLE_HIBERNATION" == "y" ]]; then
   echo "You must add a real swap partition or swap file and update resume parameters later."
 fi
 
-sudo -u "$USERNAME" bash <<'UEOF'
-set -Eeuo pipefail
-workdir="$(mktemp -d)"
-cd "$workdir"
+# sudo -u "$USERNAME" bash <<'UEOF'
+# set -Eeuo pipefail
+# workdir="$(mktemp -d)"
+# cd "$workdir"
+# git clone https://aur.archlinux.org/paru.git
+# cd paru
+# makepkg -sf --noconfirm
+# pkgfile="$(find . -maxdepth 1 -type f -name 'paru-*.pkg.tar.*' | head -n1)"
+# if [[ -z "${pkgfile:-}" ]]; then
+  # echo "Failed to locate built paru package"
+  # exit 1
+# fi
+# printf '%s' "$PWD/$pkgfile" > /tmp/paru_pkg_path
+# UEOF
+cat > /etc/motd <<'MOTD'
+Post-install note:
+To install paru after first boot, run:
+
+sudo pacman -S --needed base-devel git
+cd /tmp
 git clone https://aur.archlinux.org/paru.git
 cd paru
-makepkg -sf --noconfirm
-pkgfile="$(find . -maxdepth 1 -type f -name 'paru-*.pkg.tar.*' | head -n1)"
-if [[ -z "${pkgfile:-}" ]]; then
-  echo "Failed to locate built paru package"
-  exit 1
-fi
-printf '%s' "$PWD/$pkgfile" > /tmp/paru_pkg_path
-UEOF
+makepkg -si
+MOTD
 
 pacman -U --noconfirm "$(cat /tmp/paru_pkg_path)"
 rm -f /tmp/paru_pkg_path
 
-pacman -Q gdm gnome-shell networkmanager paru tlp zram-generator >/dev/null
+pacman -Q gdm gnome-shell networkmanager tlp zram-generator >/dev/null
 POSTINSTALL
 
 chmod +x /mnt/root/postinstall.sh
@@ -327,8 +337,7 @@ arch-chroot /mnt /usr/bin/env \
   ENABLE_HIBERNATION="$ENABLE_HIBERNATION" \
   /root/postinstall.sh
 
-arch-chroot /mnt pacman -Q gdm gnome-shell networkmanager paru tlp zram-generator >/dev/null
-
+arch-chroot /mnt pacman -Q gdm gnome-shell networkmanager tlp zram-generator >/dev/null
 sync
 cleanup_mounts
 
